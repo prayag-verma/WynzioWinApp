@@ -1,0 +1,17 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+bin/
+obj/
+# Visual Studio Code
+.vscode/
+.vscode-test/
+.vscode-server/
+.vscode-server-insiders/
+.vscode-test-archive/
+.vscode-test-archive-*
