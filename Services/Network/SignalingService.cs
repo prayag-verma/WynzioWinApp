@@ -242,26 +242,14 @@ namespace Wynzio.Services.Network
                     var content = await response.Content.ReadAsStringAsync(combinedCts.Token);
                     _logger.Debug("Received handshake response: {Content}", content);
 
-                    // Improved regex pattern to handle Socket.IO handshake response
-                    // Format is typically: <packet-length>:<packet-type><json-data>
-                    // e.g. "97:0{"sid":"abcd1234","upgrades":["websocket"],"pingInterval":25000,"pingTimeout":20000}"
-                    var match = Regex.Match(content, @"^(\d+):(\d)(.*)$");
-                    if (!match.Success)
+                    // Extract the JSON payload from the Socket.IO response
+                    // This is more robust than using regex as it handles multiple formats
+                    string jsonPayload = ExtractJsonFromSocketIOResponse(content);
+
+                    if (string.IsNullOrEmpty(jsonPayload))
                     {
-                        _logger.Error("Invalid Socket.IO handshake response format: {Content}", content);
+                        _logger.Error("Failed to extract JSON payload from Socket.IO response: {Content}", content);
                         throw new Exception($"Invalid Socket.IO handshake response: {content}");
-                    }
-
-                    // Extract packet length, type and data
-                    string packetLength = match.Groups[1].Value;
-                    string packetType = match.Groups[2].Value;
-                    string jsonPayload = match.Groups[3].Value;
-
-                    // Verify packet type (0 = open)
-                    if (packetType != "0")
-                    {
-                        _logger.Error("Unexpected Socket.IO packet type: {PacketType}", packetType);
-                        throw new Exception($"Unexpected Socket.IO packet type: {packetType}");
                     }
 
                     // Parse the JSON payload
@@ -325,6 +313,72 @@ namespace Wynzio.Services.Network
             {
                 _logger.Error(ex, "Error during Socket.IO handshake");
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Extract JSON payload from Socket.IO response, handling different formats
+        /// </summary>
+        /// <param name="response">Raw Socket.IO response</param>
+        /// <returns>JSON payload as string</returns>
+        private string ExtractJsonFromSocketIOResponse(string response)
+        {
+            if (string.IsNullOrEmpty(response))
+                return string.Empty;
+
+            try
+            {
+                // Trim any whitespace
+                response = response.Trim();
+
+                // First try standard Socket.IO v4+ packet format: length:type{json}
+                var standardMatch = Regex.Match(response, @"^(\d+):(\d)(.*)$");
+                if (standardMatch.Success)
+                {
+                    string packetType = standardMatch.Groups[2].Value;
+
+                    // Type 0 is the OPEN packet in Socket.IO
+                    if (packetType == "0")
+                    {
+                        return standardMatch.Groups[3].Value;
+                    }
+                }
+
+                // Try to find a JSON object directly - for non-standard responses
+                var jsonMatch = Regex.Match(response, @"(\{.*\})");
+                if (jsonMatch.Success)
+                {
+                    string potentialJson = jsonMatch.Groups[1].Value;
+
+                    // Validate that it's actually JSON by attempting to parse it
+                    JObject.Parse(potentialJson);
+
+                    return potentialJson;
+                }
+
+                // Alternative format: some implementations might use a different format
+                // Try to extract JSON by finding the first '{' and last '}'
+                int firstBrace = response.IndexOf('{');
+                int lastBrace = response.LastIndexOf('}');
+
+                if (firstBrace >= 0 && lastBrace > firstBrace)
+                {
+                    string potentialJson = response.Substring(firstBrace, lastBrace - firstBrace + 1);
+
+                    // Validate that it's actually JSON by attempting to parse it
+                    JObject.Parse(potentialJson);
+
+                    return potentialJson;
+                }
+
+                // If we're here, we couldn't extract valid JSON using any method
+                _logger.Warning("Could not extract valid JSON from Socket.IO response using any method");
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Error extracting JSON from Socket.IO response");
+                return string.Empty;
             }
         }
 
