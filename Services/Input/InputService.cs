@@ -163,9 +163,9 @@ namespace Wynzio.Services.Input
                     {
                         // Try parsing as object inside another object (from WebRTC data channel)
                         var outerObj = JsonConvert.DeserializeObject<dynamic>(command);
-                        if (outerObj != null && outerObj.type != null && outerObj.type.ToString() == "control-command" && outerObj.command != null)
+                        if (outerObj?.type?.ToString() == "control-command" && outerObj?.command != null)
                         {
-                            string innerCommand = outerObj.command.ToString();
+                            string innerCommand = outerObj.command!.ToString();
                             commandObj = JObject.Parse(innerCommand);
                         }
                     }
@@ -193,7 +193,7 @@ namespace Wynzio.Services.Input
                     MouseButton button = MouseButton.Left;
                     if (commandObj["button"] != null)
                     {
-                        string buttonStr = commandObj["button"].ToString();
+                        string buttonStr = commandObj["button"]?.ToString() ?? string.Empty;
                         if (Enum.TryParse<MouseButton>(buttonStr, true, out var parsedButton))
                         {
                             button = parsedButton;
