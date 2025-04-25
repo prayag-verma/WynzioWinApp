@@ -29,7 +29,7 @@ namespace Wynzio.Views
             if (_viewModel != null)
             {
                 // Update initial status in tray menu
-                UpdateTrayMenuStatus(_viewModel.StatusMessage, _viewModel.HostId);
+                UpdateTrayMenuStatus(_viewModel.StatusMessage, _viewModel.RemotePcId);
 
                 // Subscribe to property changed events
                 _viewModel.PropertyChanged += ViewModel_PropertyChanged;
@@ -49,11 +49,11 @@ namespace Wynzio.Views
         {
             // Update status in tray menu
             if (e.PropertyName == nameof(MainViewModel.StatusMessage) ||
-                e.PropertyName == nameof(MainViewModel.HostId))
+                e.PropertyName == nameof(MainViewModel.RemotePcId))
             {
                 if (_viewModel != null)
                 {
-                    UpdateTrayMenuStatus(_viewModel.StatusMessage, _viewModel.HostId);
+                    UpdateTrayMenuStatus(_viewModel.StatusMessage, _viewModel.RemotePcId);
                 }
             }
             else if (e.PropertyName == nameof(MainViewModel.IsAutoStartEnabled))

@@ -13,6 +13,7 @@ using Newtonsoft.Json.Linq;
 using Serilog;
 using Wynzio.Models;
 using System.Diagnostics;
+using Wynzio.Utilities;
 
 namespace Wynzio.Services.Network
 {
@@ -26,7 +27,7 @@ namespace Wynzio.Services.Network
         private Task? _receiveTask;
         private readonly ILogger _logger;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
-        private string _hostId = string.Empty;
+        private string _remotePcId = string.Empty;
         private int _reconnectAttempts = 0;
         private const int MaxReconnectAttempts = 5;
         private string? _serverUrl;
@@ -36,10 +37,11 @@ namespace Wynzio.Services.Network
         private string? _socketIOSid;
         private int _pingInterval = 25000; // Default ping interval in ms
         private int _pingTimeout = 20000;  // Default ping timeout in ms
+        private DateTime _lastPongTime = DateTime.MinValue;
 
         public bool IsConnected { get; private set; }
 
-        public string HostId => _hostId;
+        public string RemotePcId => _remotePcId;
 
         public event EventHandler<SignalingMessageEventArgs>? MessageReceived;
         public event EventHandler<ConnectionStatusEventArgs>? ConnectionStatusChanged;
@@ -64,7 +66,7 @@ namespace Wynzio.Services.Network
                 _logger.Information("Internet connectivity restored. Attempting to reconnect...");
                 // Reset reconnection attempts to start fresh
                 _reconnectAttempts = 0;
-                ConnectAsync(_serverUrl, _hostId).ConfigureAwait(false);
+                ConnectAsync(_serverUrl, _remotePcId).ConfigureAwait(false);
             }
             else if (!e.IsInternetAvailable && IsConnected)
             {
@@ -73,12 +75,154 @@ namespace Wynzio.Services.Network
         }
 
         /// <summary>
+        /// Attempt to reuse an existing session
+        /// </summary>
+        public async Task ReuseSessionAsync(string sid, string remotePcId)
+        {
+            // Check for empty remotePcId and generate one if needed
+            if (string.IsNullOrEmpty(remotePcId))
+            {
+                _logger.Warning("Empty remotePcId provided, generating new one");
+                remotePcId = EncryptionHelper.GenerateHostId();
+
+                // Save to settings
+                var settings = ConnectionSettings.Load();
+                settings.RemotePcId = remotePcId;
+                settings.Save();
+
+                _logger.Information("Generated new remotePcId: {RemotePcId}", remotePcId);
+            }
+
+            // Log reuse attempt
+            _logger.Information("Attempting to reuse session {Sid} for {RemotePcId}", sid, remotePcId);
+
+            try
+            {
+                if (!_networkStatusService.IsInternetAvailable)
+                {
+                    _logger.Warning("No internet connectivity. Session reuse queued for when internet is available.");
+                    var networkSettings = ConnectionSettings.Load();
+                    _serverUrl = networkSettings.SignalServer;
+                    _remotePcId = remotePcId;
+                    OnConnectionStatusChanged(false, "Waiting for internet connectivity...");
+                    return;
+                }
+
+                // Store parameters
+                _socketIOSid = sid;
+                _remotePcId = remotePcId;
+
+                // Create new cancellation token source
+                _cts?.Cancel();
+                _cts?.Dispose();
+                _cts = new CancellationTokenSource();
+
+                // Create new WebSocket instance
+                _webSocket?.Dispose();
+                _webSocket = new ClientWebSocket();
+
+                // Set timeout for connection
+                _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+
+                // Set connection status to attempting
+                OnConnectionStatusChanged(false, "Reconnecting with existing session...");
+
+                // Load settings for API key
+                var appSettings = ConnectionSettings.Load();
+
+                // Connect WebSocket with existing sid
+                var wsUri = new UriBuilder(appSettings.SignalServer);
+                var query = HttpUtility.ParseQueryString(wsUri.Query);
+                query["EIO"] = "4";
+                query["transport"] = "websocket";
+                query["sid"] = _socketIOSid;
+                wsUri.Query = query.ToString();
+
+                // Log the connection URI
+                _logger.Information("Reconnecting to WebSocket at {Uri}", wsUri.Uri);
+
+                // Add authorization header with API key
+                _webSocket.Options.SetRequestHeader("Authorization", $"ApiKey {appSettings.ApiKey}");
+
+                try
+                {
+                    // Connect to the server with timeout
+                    var connectionCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                        connectionCts.Token, _cts.Token);
+
+                    await _webSocket.ConnectAsync(wsUri.Uri, combinedCts.Token);
+
+                    // Start receiving messages
+                    _receiveTask = ReceiveMessagesAsync(_cts.Token);
+
+                    // Update connection status
+                    IsConnected = true;
+                    _reconnectAttempts = 0;
+
+                    // Perform Socket.IO connection upgrade
+                    await SendSocketIOMessage("5"); // Engine.IO upgrade packet
+
+                    // Connect to the default namespace
+                    await SendSocketIOMessage("40"); // Socket.IO connect packet
+
+                    // Set up heartbeat timer
+                    StartHeartbeatTimer();
+
+                    // Send authentication request
+                    await SendAuthenticationRequestAsync();
+
+                    OnConnectionStatusChanged(true);
+                    _logger.Information("Successfully reconnected with existing session");
+
+                    // Log session info for debugging
+                    LogSessionInfo();
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning("Session reuse failed: {Message}", ex.Message);
+
+                    // Clear invalid session
+                    SessionManager.ClearSession();
+
+                    // If reuse fails, perform a new handshake
+                    await ConnectAsync(appSettings.SignalServer, _remotePcId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Error during session reuse attempt");
+
+                // Clear invalid session
+                SessionManager.ClearSession();
+
+                // Fall back to regular connection
+                var appSettings = ConnectionSettings.Load();
+                await ConnectAsync(appSettings.SignalServer, _remotePcId);
+            }
+        }
+
+        /// <summary>
         /// Connect to the signaling server using Socket.IO protocol
         /// </summary>
-        public async Task ConnectAsync(string serverUrl, string hostId)
+        public async Task ConnectAsync(string serverUrl, string remotePcId)
         {
+            // Check for empty remotePcId and generate one if needed
+            if (string.IsNullOrEmpty(remotePcId))
+            {
+                _logger.Warning("Empty remotePcId provided, generating new one");
+                remotePcId = EncryptionHelper.GenerateHostId();
+
+                // Save to settings
+                var settings = ConnectionSettings.Load();
+                settings.RemotePcId = remotePcId;
+                settings.Save();
+
+                _logger.Information("Generated new remotePcId: {RemotePcId}", remotePcId);
+            }
+
             // Log connection attempt
-            _logger.Information("Attempting to connect to {ServerUrl} with hostId {HostId}", serverUrl, hostId);
+            _logger.Information("Attempting to connect to {ServerUrl} with remotePcId {RemotePcId}", serverUrl, remotePcId);
 
             // Reset disconnecting flag
             _isDisconnecting = false;
@@ -90,14 +234,39 @@ namespace Wynzio.Services.Network
                 {
                     _logger.Warning("No internet connectivity. Connection attempt queued for when internet is available.");
                     _serverUrl = serverUrl;
-                    _hostId = hostId;
+                    _remotePcId = remotePcId;
                     OnConnectionStatusChanged(false, "Waiting for internet connectivity...");
+                    return;
+                }
+
+                // Check if server is reachable
+                bool isReachable = await IsServerReachableAsync(serverUrl);
+                if (!isReachable)
+                {
+                    _logger.Warning("Server {ServerUrl} is not reachable", serverUrl);
+                    OnConnectionStatusChanged(false, "Server not reachable");
+
+                    // Store parameters for reconnection
+                    _serverUrl = serverUrl;
+                    _remotePcId = remotePcId;
+
+                    // Try to reconnect later
+                    await RecoverConnectionAsync();
                     return;
                 }
 
                 // Store parameters for reconnection
                 _serverUrl = serverUrl;
-                _hostId = hostId;
+                _remotePcId = remotePcId;
+
+                // Try to use existing session
+                var session = SessionManager.LoadSession();
+                if (SessionManager.IsSessionValid(session) && !string.IsNullOrEmpty(session?.Sid))
+                {
+                    _logger.Information("Found valid session, attempting to reuse");
+                    await ReuseSessionAsync(session.Sid, remotePcId);
+                    return;
+                }
 
                 // Create new cancellation token source
                 _cts?.Cancel();
@@ -122,10 +291,10 @@ namespace Wynzio.Services.Network
                 try
                 {
                     // Load settings for API key
-                    var settings = ConnectionSettings.Load();
+                    var appSettings = ConnectionSettings.Load();
 
                     // Perform Socket.IO handshake
-                    await PerformSocketIOHandshake(serverUrl, settings.ApiKey, combinedCts.Token);
+                    await PerformSocketIOHandshake(serverUrl, appSettings.ApiKey, combinedCts.Token);
 
                     // Now connect WebSocket with proper sid
                     var wsUri = new UriBuilder(serverUrl);
@@ -139,7 +308,7 @@ namespace Wynzio.Services.Network
                     _logger.Information("Connecting to WebSocket at {Uri}", wsUri.Uri);
 
                     // Add authorization header with API key
-                    _webSocket.Options.SetRequestHeader("Authorization", $"ApiKey {settings.ApiKey}");
+                    _webSocket.Options.SetRequestHeader("Authorization", $"ApiKey {appSettings.ApiKey}");
 
                     // Connect to the server
                     await _webSocket.ConnectAsync(wsUri.Uri, combinedCts.Token);
@@ -163,11 +332,20 @@ namespace Wynzio.Services.Network
                     // Set up heartbeat timer
                     StartHeartbeatTimer();
 
+                    // Save the session
+                    if (!string.IsNullOrEmpty(_socketIOSid))
+                    {
+                        SessionManager.SaveSession(_socketIOSid);
+                    }
+
                     // Send authentication request
                     await SendAuthenticationRequestAsync();
 
                     OnConnectionStatusChanged(true);
                     _logger.Information("Connected to signaling server: {ServerUrl}", serverUrl);
+
+                    // Log session info for debugging
+                    LogSessionInfo();
                 }
                 catch (OperationCanceledException)
                 {
@@ -195,19 +373,82 @@ namespace Wynzio.Services.Network
                 OnConnectionStatusChanged(false, "Connection failed");
 
                 // Try to reconnect if appropriate and not explicitly disconnecting
-                if (_reconnectAttempts < MaxReconnectAttempts && _serverUrl != null && !_isDisconnecting)
+                if (!_isDisconnecting && _serverUrl != null)
                 {
-                    _reconnectAttempts++;
-                    _logger.Information("Attempting to reconnect ({Attempt}/{MaxAttempts})...",
-                        _reconnectAttempts, MaxReconnectAttempts);
-
-                    // Wait before reconnecting with exponential backoff
-                    int delaySeconds = (int)Math.Pow(2, _reconnectAttempts);
-                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
-
-                    // Try to reconnect
-                    await ConnectAsync(_serverUrl, _hostId);
+                    await RecoverConnectionAsync();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Handle connection recovery after failure
+        /// </summary>
+        private async Task RecoverConnectionAsync()
+        {
+            if (_reconnectAttempts >= MaxReconnectAttempts || _isDisconnecting)
+                return;
+
+            _reconnectAttempts++;
+
+            // Calculate delay with exponential backoff
+            int delaySeconds = (int)Math.Min(30, Math.Pow(2, _reconnectAttempts));
+
+            _logger.Information("Attempting to reconnect ({Attempt}/{MaxAttempts}) in {Delay} seconds...",
+                _reconnectAttempts, MaxReconnectAttempts, delaySeconds);
+
+            await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+
+            // First try session reuse
+            var session = SessionManager.LoadSession();
+            if (SessionManager.IsSessionValid(session) && !string.IsNullOrEmpty(session?.Sid))
+            {
+                try
+                {
+                    await ReuseSessionAsync(session.Sid, _remotePcId);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning("Session reuse failed during recovery: {Error}", ex.Message);
+                    // Continue to regular connection
+                }
+            }
+
+            // Fall back to regular connection
+            if (_serverUrl != null)
+            {
+                await ConnectAsync(_serverUrl, _remotePcId);
+            }
+        }
+
+        /// <summary>
+        /// Check if server is reachable
+        /// </summary>
+        private async Task<bool> IsServerReachableAsync(string serverUrl)
+        {
+            try
+            {
+                // Convert to HTTP URL for direct check
+                string httpUrl = serverUrl.Replace("wss://", "https://").Replace("ws://", "http://");
+
+                using var client = new HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(5);
+
+                // Just check if the domain is reachable
+                var uri = new Uri(httpUrl);
+                string baseUrl = $"{uri.Scheme}://{uri.Host}";
+
+                var response = await client.GetAsync(baseUrl);
+
+                _logger.Information("Server check: {ServerUrl} is reachable (status: {StatusCode})",
+                    baseUrl, response.StatusCode);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning("Server {ServerUrl} is not reachable: {Error}", serverUrl, ex.Message);
+                return false;
             }
         }
 
@@ -220,7 +461,9 @@ namespace Wynzio.Services.Network
             {
                 // Convert WebSocket URL to HTTP
                 string httpUrl = serverUrl.Replace("wss://", "https://").Replace("ws://", "http://");
-                string handshakeUrl = $"{httpUrl}/socket.io/?EIO=4&transport=polling";
+
+                // Build the handshake URL - keep the path from the original URL
+                string handshakeUrl = $"{httpUrl}/?EIO=4&transport=polling";
 
                 _logger.Information("Initiating Socket.IO handshake with {HandshakeUrl}", handshakeUrl);
 
@@ -243,7 +486,6 @@ namespace Wynzio.Services.Network
                     _logger.Debug("Received handshake response: {Content}", content);
 
                     // Extract the JSON payload from the Socket.IO response
-                    // This is more robust than using regex as it handles multiple formats
                     string jsonPayload = ExtractJsonFromSocketIOResponse(content);
 
                     if (string.IsNullOrEmpty(jsonPayload))
@@ -267,7 +509,6 @@ namespace Wynzio.Services.Network
                             throw new Exception("Socket.IO handshake did not return a session ID");
                         }
 
-                        // Log success with session info
                         _logger.Information("Socket.IO handshake successful. Session ID: {SessionId}, Ping interval: {PingInterval}ms",
                             _socketIOSid, _pingInterval);
 
@@ -383,6 +624,30 @@ namespace Wynzio.Services.Network
         }
 
         /// <summary>
+        /// Log Socket.IO session information
+        /// </summary>
+        private void LogSessionInfo()
+        {
+            _logger.Information("Socket.IO Session Info:");
+            _logger.Information("  Session ID: {Sid}", _socketIOSid ?? "None");
+            _logger.Information("  RemotePcId: {RemotePcId}", _remotePcId);
+            _logger.Information("  Server URL: {ServerUrl}", _serverUrl);
+            _logger.Information("  Connected: {IsConnected}", IsConnected);
+            _logger.Information("  Ping Interval: {PingInterval}ms", _pingInterval);
+            _logger.Information("  Ping Timeout: {PingTimeout}ms", _pingTimeout);
+
+            // Check saved session
+            var savedSession = SessionManager.LoadSession();
+            _logger.Information("  Saved Session: {HasSession}", savedSession != null);
+            if (savedSession != null)
+            {
+                _logger.Information("  Saved Session ID: {Sid}", savedSession.Sid);
+                _logger.Information("  Saved Session Age: {AgeHours} hours",
+                    (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - savedSession.Timestamp) / 3600000.0);
+            }
+        }
+
+        /// <summary>
         /// Start the heartbeat timer
         /// </summary>
         private void StartHeartbeatTimer()
@@ -408,6 +673,14 @@ namespace Wynzio.Services.Network
                 // Send Socket.IO ping packet (packet type 2)
                 await SendSocketIOMessage("2");
                 _logger.Debug("Socket.IO ping sent");
+
+                // Check for missing pongs (connection may be stale)
+                if (_lastPongTime != DateTime.MinValue &&
+                    (DateTime.Now - _lastPongTime).TotalMilliseconds > _pingTimeout * 2)
+                {
+                    _logger.Warning("No pong received for too long, connection may be stale");
+                    // Consider reconnecting here
+                }
             }
             catch (Exception ex)
             {
@@ -481,7 +754,7 @@ namespace Wynzio.Services.Network
             {
                 type = messageType.ToString().ToLower(),
                 to = peerId,
-                from = _hostId,
+                from = _remotePcId,
                 payload
             };
 
@@ -511,7 +784,7 @@ namespace Wynzio.Services.Network
                     if (_serverUrl != null && !_isDisconnecting && _networkStatusService.IsInternetAvailable)
                     {
                         _reconnectAttempts = 0;
-                        await ConnectAsync(_serverUrl, _hostId);
+                        await ConnectAsync(_serverUrl, _remotePcId);
                     }
                 }
             }
@@ -564,34 +837,25 @@ namespace Wynzio.Services.Network
             try
             {
                 // Load connection settings
-                var settings = ConnectionSettings.Load();
+                var appSettings = ConnectionSettings.Load();
 
                 // Generate a hardware-based fingerprint if needed
-                if (string.IsNullOrEmpty(_hostId))
+                if (string.IsNullOrEmpty(_remotePcId))
                 {
-                    _hostId = GetHardwareFingerprint();
-                    settings.HostId = _hostId;
-                    settings.Save();
+                    _remotePcId = GetHardwareFingerprint();
+                    appSettings.RemotePcId = _remotePcId;
+                    appSettings.Save();
                 }
 
-                // Create authentication message with updated format
+                // Create authentication message with simplified format
                 var authData = new
                 {
                     type = "auto-register",
-                    hostId = _hostId,
-                    systemName = settings.SystemName,
-                    apiKey = settings.ApiKey,
-                    platform = "windows",
-                    version = GetApplicationVersion(),
-                    timestamp = DateTime.Now.Ticks,
-                    // Add deviceId to match server expectations
-                    deviceId = _hostId,
-                    metadata = new
-                    {
-                        osVersion = Environment.OSVersion.ToString(),
-                        platform = "windows",
-                        version = GetApplicationVersion()
-                    }
+                    remotePcId = _remotePcId,
+                    systemName = appSettings.SystemName,
+                    apiKey = appSettings.ApiKey,
+                    OSName = appSettings.OSName,
+                    OSversion = appSettings.OSVersion
                 };
 
                 // Create Socket.IO event message
@@ -604,7 +868,7 @@ namespace Wynzio.Services.Network
                 string eventJson = JsonConvert.SerializeObject(eventData);
                 await SendSocketIOMessage("42" + eventJson); // 42 = Socket.IO event packet
 
-                _logger.Information("Sent authentication request for device {DeviceId}", _hostId);
+                _logger.Information("Sent authentication request for remote PC {RemotePcId}", _remotePcId);
             }
             catch (Exception ex)
             {
@@ -635,23 +899,6 @@ namespace Wynzio.Services.Network
             {
                 _logger.Warning(ex, "Failed to generate hardware fingerprint, using random ID");
                 return Guid.NewGuid().ToString("N")[..16];
-            }
-        }
-
-        /// <summary>
-        /// Get application version
-        /// </summary>
-        private static string GetApplicationVersion()
-        {
-            try
-            {
-                var assembly = Assembly.GetExecutingAssembly();
-                var version = assembly.GetName().Version;
-                return version?.ToString() ?? "1.0.0.0";
-            }
-            catch
-            {
-                return "1.0.0.0";
             }
         }
 
@@ -775,7 +1022,7 @@ namespace Wynzio.Services.Network
                     {
                         await Task.Delay(2000, CancellationToken.None); // Wait before reconnecting
                         _reconnectAttempts = 0; // Reset attempt counter for a new series of retries
-                        await ConnectAsync(_serverUrl, _hostId);
+                        await ConnectAsync(_serverUrl, _remotePcId);
                     }
                     catch (Exception reconnectEx)
                     {
@@ -819,12 +1066,19 @@ namespace Wynzio.Services.Network
                         _socketIOSid = handshakeData["sid"]?.ToString();
                         _pingInterval = handshakeData["pingInterval"]?.Value<int>() ?? 25000;
                         _pingTimeout = handshakeData["pingTimeout"]?.Value<int>() ?? 20000;
+
+                        // Save the session
+                        if (!string.IsNullOrEmpty(_socketIOSid))
+                        {
+                            SessionManager.SaveSession(_socketIOSid);
+                        }
                     }
                     _logger.Information("Socket.IO connection opened");
                 }
                 else if (message.StartsWith("3")) // Engine.IO pong
                 {
-                    // Heartbeat response, nothing to do
+                    // Heartbeat response, update last pong time
+                    _lastPongTime = DateTime.Now;
                     _logger.Debug("Received Socket.IO pong");
                 }
                 else if (message.StartsWith("40")) // Socket.IO connect event
@@ -893,10 +1147,11 @@ namespace Wynzio.Services.Network
                         // Someone wants to connect to us
                         if (payload is JObject connectPayload)
                         {
-                            string clientId = connectPayload["clientId"]?.ToString() ?? "";
-                            if (!string.IsNullOrEmpty(clientId))
+                            string webClientId = connectPayload["webClientId"]?.ToString() ??
+                                                connectPayload["clientId"]?.ToString() ?? "";
+                            if (!string.IsNullOrEmpty(webClientId))
                             {
-                                await HandleConnectionRequestAsync(clientId, connectPayload);
+                                await HandleConnectionRequestAsync(webClientId, connectPayload);
                             }
                         }
                         break;
@@ -933,54 +1188,59 @@ namespace Wynzio.Services.Network
                 {
                     case "connect":
                         // New client connection request
-                        _logger.Information("Connection request from client {ClientId}", from);
+                        _logger.Information("Connection request from web client {WebClientId}", from);
                         await HandleConnectionRequestAsync(from, payload);
                         break;
 
                     case "offer":
                         // WebRTC offer from client
-                        _logger.Information("Received WebRTC offer from {ClientId}", from);
+                        _logger.Information("Received WebRTC offer from {WebClientId}", from);
                         OnMessageReceived(new SignalingMessageEventArgs(
                             from, SignalingMessageType.Offer, payload ?? new JObject()));
                         break;
 
                     case "answer":
                         // WebRTC answer from client
-                        _logger.Information("Received WebRTC answer from {ClientId}", from);
+                        _logger.Information("Received WebRTC answer from {WebClientId}", from);
                         OnMessageReceived(new SignalingMessageEventArgs(
                             from, SignalingMessageType.Answer, payload ?? new JObject()));
                         break;
 
                     case "ice-candidate":
                         // ICE candidate from client
-                        _logger.Debug("Received ICE candidate from {ClientId}", from);
+                        _logger.Debug("Received ICE candidate from {WebClientId}", from);
                         OnMessageReceived(new SignalingMessageEventArgs(
                             from, SignalingMessageType.IceCandidate, payload ?? new JObject()));
                         break;
 
                     case "disconnect":
                         // Client disconnection
-                        _logger.Information("Client {ClientId} disconnected", from);
+                        _logger.Information("Web client {WebClientId} disconnected", from);
                         OnMessageReceived(new SignalingMessageEventArgs(
                             from, SignalingMessageType.Disconnect, new JObject()));
                         break;
 
                     case "remote-control-request":
-                        // Remote control request from a client
-                        _logger.Information("Remote control request from client {ClientId}", from);
+                        // Remote control request from a client - AUTO-ACCEPT
+                        _logger.Information("Remote control request from web client {WebClientId} - auto-accepting", from);
+
+                        // Extract requestId
                         if (payload != null)
                         {
                             string requestId = payload["requestId"]?.ToString() ?? "";
                             string peerId = payload["peerId"]?.ToString() ?? from;
 
-                            // Auto-accept remote control request
+                            // Always auto-accept remote control request with no conditions
                             await SendControlResponseAsync(requestId, peerId, true);
+
+                            // No user confirmation dialog or permission checking
+                            _logger.Information("Auto-accepted remote control request from {WebClientId}", from);
                         }
                         break;
 
                     default:
                         // Unknown message type
-                        _logger.Warning("Received unknown message type: {Type} from {ClientId}", type, from);
+                        _logger.Warning("Received unknown message type: {Type} from {WebClientId}", type, from);
                         break;
                 }
             }
@@ -1026,25 +1286,25 @@ namespace Wynzio.Services.Network
         /// <summary>
         /// Handle a connection request from a client
         /// </summary>
-        private async Task HandleConnectionRequestAsync(string clientId, JToken? payload)
+        private async Task HandleConnectionRequestAsync(string webClientId, JToken? payload)
         {
             // Create a new session for this client
             var clientIp = GetClientIpFromPayload(payload);
-            var session = new UserSession(clientId, clientIp);
+            var session = new UserSession(webClientId, clientIp);
 
             // Notify about the new session
             OnSessionCreated(session);
 
-            // Automatically accept the connection request for now
+            // Automatically accept the connection request
             var response = new
             {
                 type = "connect-response",
-                to = clientId,
-                from = _hostId,
+                to = webClientId,
+                from = _remotePcId,
                 payload = new
                 {
                     accepted = true,
-                    hostId = _hostId,
+                    remotePcId = _remotePcId,
                     systemName = Environment.MachineName
                 }
             };

@@ -105,6 +105,35 @@ namespace Wynzio.Utilities
         }
 
         /// <summary>
+        /// Generate an encryption key based on machine-specific information
+        /// </summary>
+        /// <returns>Encryption key</returns>
+        public static string GenerateEncryptionKey()
+        {
+            try
+            {
+                // Get hardware information from system environment
+                var processorId = Environment.ProcessorCount.ToString();
+                var machineGuid = Environment.MachineName;
+                var osVersion = Environment.OSVersion.ToString();
+
+                // Combine hardware info with application-specific data
+                var combined = $"Wynzio-{processorId}-{machineGuid}-{osVersion}";
+
+                // Generate key using SHA256
+                byte[] keyBytes = SHA256.HashData(Encoding.UTF8.GetBytes(combined));
+
+                // Convert to Base64 string
+                return Convert.ToBase64String(keyBytes);
+            }
+            catch (Exception)
+            {
+                // Fallback to static key if machine info can't be accessed
+                return "Wynzio-SecureRemoteAccess-FallbackKey-2025";
+            }
+        }
+
+        /// <summary>
         /// Generate a secure random string with the specified length
         /// </summary>
         /// <param name="length">Length of the string to generate</param>

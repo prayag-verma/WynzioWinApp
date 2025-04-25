@@ -32,7 +32,7 @@ namespace Wynzio.ViewModels
         private bool _isCapturing;
         private bool _isAutoStartEnabled;
         private string _statusMessage = "Disconnected";
-        private string _hostId = "";
+        private string _remotePcId = "";
         private string _activeClientId = "";
 
         /// <summary>
@@ -83,10 +83,10 @@ namespace Wynzio.ViewModels
         /// <summary>
         /// Host ID for this computer
         /// </summary>
-        public string HostId
+        public string RemotePcId
         {
-            get => _hostId;
-            private set => SetProperty(ref _hostId, value);
+            get => _remotePcId;
+            private set => SetProperty(ref _remotePcId, value);
         }
 
         /// <summary>
@@ -135,7 +135,7 @@ namespace Wynzio.ViewModels
 
             // Load settings
             _settings = ConnectionSettings.Load();
-            _hostId = _settings.HostId;
+            _remotePcId = _settings.RemotePcId;
 
             // Initialize auto-start state
             _isAutoStartEnabled = _autoStartManager.IsAutoStartEnabled();
@@ -176,7 +176,7 @@ namespace Wynzio.ViewModels
                 StatusMessage = "Connecting...";
 
                 // Connect to signaling server
-                await _signalingService.ConnectAsync(_settings.SignalServer, _settings.HostId);
+                await _signalingService.ConnectAsync(_settings.SignalServer, _settings.RemotePcId);
 
                 // Initialize WebRTC service
                 _webRTCService.Initialize();

@@ -16,7 +16,7 @@ namespace Wynzio.Services.Input
     internal class InputService : IInputService
     {
         private readonly ILogger _logger;
-        private bool _isInputEnabled = false;
+        private bool _isInputEnabled = true; // Always enabled by default
         private readonly SemaphoreSlim _inputLock = new SemaphoreSlim(1, 1);
 
         // Windows API constants for input simulation
@@ -113,6 +113,10 @@ namespace Wynzio.Services.Input
         public InputService()
         {
             _logger = Log.ForContext<InputService>();
+
+            // Always enable input by default for auto-acceptance
+            _isInputEnabled = true;
+            _logger.Information("Input service initialized with auto-accept enabled");
         }
 
         /// <summary>
@@ -129,8 +133,8 @@ namespace Wynzio.Services.Input
         /// </summary>
         public void DisableInput()
         {
-            _isInputEnabled = false;
-            _logger.Information("Input simulation disabled");
+            // For auto-accept requirements, we don't actually disable input
+            _logger.Information("Input disable request received, but auto-accept is active");
         }
 
         /// <summary>
@@ -139,14 +143,11 @@ namespace Wynzio.Services.Input
         /// <param name="command">JSON command string</param>
         public async Task ProcessInputCommandAsync(string command)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to process input command while input is disabled");
-                return;
-            }
-
             try
             {
+                // Always process input - no disabled checks needed
+                _isInputEnabled = true;
+
                 // Lock to prevent multiple simultaneous input commands
                 await _inputLock.WaitAsync();
 
@@ -163,9 +164,12 @@ namespace Wynzio.Services.Input
                     {
                         // Try parsing as object inside another object (from WebRTC data channel)
                         var outerObj = JsonConvert.DeserializeObject<dynamic>(command);
-                        if (outerObj?.type?.ToString() == "control-command" && outerObj?.command != null)
+                        if (outerObj != null &&
+                            outerObj.type != null &&
+                            outerObj.command != null &&
+                            outerObj.type.ToString() == "control-command")
                         {
-                            string innerCommand = outerObj.command!.ToString();
+                            string innerCommand = outerObj.command.ToString();
                             commandObj = JObject.Parse(innerCommand);
                         }
                     }
@@ -177,10 +181,10 @@ namespace Wynzio.Services.Input
                     }
 
                     // Get command type
-                    string typeStr = commandObj["type"]?.ToString() ?? "";
-                    if (!Enum.TryParse<InputCommandType>(typeStr, true, out var commandType))
+                    string? typeStr = commandObj["type"]?.ToString();
+                    if (string.IsNullOrEmpty(typeStr) || !Enum.TryParse<InputCommandType>(typeStr, true, out var commandType))
                     {
-                        _logger.Warning("Invalid command type: {Type}", typeStr);
+                        _logger.Warning("Invalid command type: {Type}", typeStr ?? "null");
                         return;
                     }
 
@@ -193,8 +197,8 @@ namespace Wynzio.Services.Input
                     MouseButton button = MouseButton.Left;
                     if (commandObj["button"] != null)
                     {
-                        string buttonStr = commandObj["button"]?.ToString() ?? string.Empty;
-                        if (Enum.TryParse<MouseButton>(buttonStr, true, out var parsedButton))
+                        string? buttonStr = commandObj["button"]?.ToString();
+                        if (!string.IsNullOrEmpty(buttonStr) && Enum.TryParse<MouseButton>(buttonStr, true, out var parsedButton))
                         {
                             button = parsedButton;
                         }
@@ -278,16 +282,18 @@ namespace Wynzio.Services.Input
         /// </summary>
         public async Task SendMouseMoveAsync(int x, int y, bool isRelative = false)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to simulate mouse move while input is disabled");
-                return;
-            }
+            // No need to check if input is enabled - always allow
 
             await Task.Run(() =>
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.Warning("Mouse movement simulation is only supported on Windows");
+                        return;
+                    }
+
                     Point targetPosition;
 
                     if (isRelative)
@@ -353,16 +359,18 @@ namespace Wynzio.Services.Input
         /// </summary>
         public async Task SendMouseDownAsync(MouseButton button)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to simulate mouse down while input is disabled");
-                return;
-            }
+            // No need to check if input is enabled - always allow
 
             await Task.Run(() =>
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.Warning("Mouse input simulation is only supported on Windows");
+                        return;
+                    }
+
                     // Prepare inputs
                     var inputs = new INPUT[1];
                     inputs[0].type = INPUT_MOUSE;
@@ -414,16 +422,18 @@ namespace Wynzio.Services.Input
         /// </summary>
         public async Task SendMouseUpAsync(MouseButton button)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to simulate mouse up while input is disabled");
-                return;
-            }
+            // No need to check if input is enabled - always allow
 
             await Task.Run(() =>
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.Warning("Mouse input simulation is only supported on Windows");
+                        return;
+                    }
+
                     // Prepare inputs
                     var inputs = new INPUT[1];
                     inputs[0].type = INPUT_MOUSE;
@@ -475,16 +485,18 @@ namespace Wynzio.Services.Input
         /// </summary>
         public async Task SendMouseScrollAsync(int delta)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to simulate mouse scroll while input is disabled");
-                return;
-            }
+            // No need to check if input is enabled - always allow
 
             await Task.Run(() =>
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.Warning("Mouse scroll simulation is only supported on Windows");
+                        return;
+                    }
+
                     // Prepare input
                     var inputs = new INPUT[1];
                     inputs[0].type = INPUT_MOUSE;
@@ -531,16 +543,18 @@ namespace Wynzio.Services.Input
         /// </summary>
         public async Task SendKeyDownAsync(int keyCode)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to simulate key down while input is disabled");
-                return;
-            }
+            // No need to check if input is enabled - always allow
 
             await Task.Run(() =>
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.Warning("Keyboard input simulation is only supported on Windows");
+                        return;
+                    }
+
                     // Prepare input
                     var inputs = new INPUT[1];
                     inputs[0].type = INPUT_KEYBOARD;
@@ -573,16 +587,18 @@ namespace Wynzio.Services.Input
         /// </summary>
         public async Task SendKeyUpAsync(int keyCode)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to simulate key up while input is disabled");
-                return;
-            }
+            // No need to check if input is enabled - always allow
 
             await Task.Run(() =>
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.Warning("Keyboard input simulation is only supported on Windows");
+                        return;
+                    }
+
                     // Prepare input
                     var inputs = new INPUT[1];
                     inputs[0].type = INPUT_KEYBOARD;
@@ -615,11 +631,7 @@ namespace Wynzio.Services.Input
         /// </summary>
         public async Task SendTextAsync(string text)
         {
-            if (!_isInputEnabled)
-            {
-                _logger.Warning("Attempted to simulate text input while input is disabled");
-                return;
-            }
+            // No need to check if input is enabled - always allow
 
             if (string.IsNullOrEmpty(text))
                 return;
@@ -684,6 +696,12 @@ namespace Wynzio.Services.Input
             {
                 try
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.Warning("Unicode character input simulation is only supported on Windows");
+                        return;
+                    }
+
                     // Prepare input for Unicode character
                     var inputs = new INPUT[2]; // Need 2 inputs: one down, one up
 
@@ -797,10 +815,17 @@ namespace Wynzio.Services.Input
         }
 
         /// <summary>
-        /// Get current cursor position
+        /// Get current mouse cursor position
         /// </summary>
         public Point GetCursorPosition()
         {
+            if (!OperatingSystem.IsWindows())
+            {
+                // Return a default position for non-Windows platforms
+                _logger.Warning("GetCursorPosition is only supported on Windows");
+                return new Point(0, 0);
+            }
+
             GetCursorPos(out POINT point);
             return new Point(point.X, point.Y);
         }
@@ -810,6 +835,11 @@ namespace Wynzio.Services.Input
         /// </summary>
         private Point EnsureWithinScreenBounds(Point p)
         {
+            if (!OperatingSystem.IsWindows())
+            {
+                return p;
+            }
+
             // Get the full desktop area (all monitors combined)
             Rectangle virtualScreen = SystemInformation.VirtualScreen;
 

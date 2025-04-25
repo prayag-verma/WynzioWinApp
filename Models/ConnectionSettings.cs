@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Wynzio.Utilities;
+using System.Runtime.InteropServices;
 
 namespace Wynzio.Models
 {
@@ -18,8 +19,8 @@ namespace Wynzio.Models
             "Wynzio",
             SettingsFileName);
 
-        private string _hostId = string.Empty;
-        private string _signalServer = "wss://wynzio.com/socket.io";
+        private string _remotePcId = string.Empty;
+        private string _signalServer = "wss://wynzio.com/signal";
         private bool _autoConnect = true;
         private string _stunServer = "stun:stun.l.google.com:19302";
         private string _turnServer = string.Empty;
@@ -35,23 +36,71 @@ namespace Wynzio.Models
         private int _maxReconnectAttempts = 10;
         private int _connectionTimeout = 10000;
         private string _systemName = string.Empty;
+        private string _osName = string.Empty;
+        private string _osVersion = string.Empty;
 
         /// <summary>
-        /// Unique identifier for this host
+        /// Unique identifier for this remote PC
         /// </summary>
-        public string HostId
+        public string RemotePcId
         {
-            get => _hostId;
-            set => SetProperty(ref _hostId, value);
+            get => _remotePcId;
+            set => SetProperty(ref _remotePcId, value);
         }
 
         /// <summary>
-        /// System name for this host (computer name by default)
+        /// System name for this remote PC (computer name by default)
         /// </summary>
         public string SystemName
         {
             get => string.IsNullOrEmpty(_systemName) ? Environment.MachineName : _systemName;
             set => SetProperty(ref _systemName, value);
+        }
+
+        /// <summary>
+        /// OS Name (Windows edition)
+        /// </summary>
+        public string OSName
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(_osName))
+                {
+                    try
+                    {
+                        if (OperatingSystem.IsWindows())
+                        {
+                            _osName = GetWindowsEdition();
+                        }
+                        else
+                        {
+                            _osName = Environment.OSVersion.Platform.ToString();
+                        }
+                    }
+                    catch
+                    {
+                        _osName = "Windows";
+                    }
+                }
+                return _osName;
+            }
+            set => SetProperty(ref _osName, value);
+        }
+
+        /// <summary>
+        /// OS Version
+        /// </summary>
+        public string OSVersion
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(_osVersion))
+                {
+                    _osVersion = Environment.OSVersion.Version.ToString();
+                }
+                return _osVersion;
+            }
+            set => SetProperty(ref _osVersion, value);
         }
 
         /// <summary>
@@ -239,10 +288,10 @@ namespace Wynzio.Models
             // Return default settings if file doesn't exist or error occurred
             var defaultSettings = new ConnectionSettings();
 
-            // Generate and save a new host ID if none exists
-            if (string.IsNullOrEmpty(defaultSettings.HostId))
+            // Generate and save a new remote PC ID if none exists
+            if (string.IsNullOrEmpty(defaultSettings.RemotePcId))
             {
-                defaultSettings.HostId = GenerateNewHostId();
+                defaultSettings.RemotePcId = GenerateNewRemotePcId();
                 defaultSettings.Save();
             }
 
@@ -250,12 +299,41 @@ namespace Wynzio.Models
         }
 
         /// <summary>
-        /// Generate a new secure random host ID
+        /// Generate a new secure random remote PC ID
         /// </summary>
-        /// <returns>A new host ID</returns>
-        private static string GenerateNewHostId()
+        /// <returns>A new remote PC ID</returns>
+        private static string GenerateNewRemotePcId()
         {
             return EncryptionHelper.GenerateHostId();
+        }
+
+        /// <summary>
+        /// Get Windows edition name
+        /// </summary>
+        /// <returns>Windows edition (e.g., "Windows 11 Home")</returns>
+        private static string GetWindowsEdition()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    // This is Windows-specific code that should be protected by the platform check
+                    string? productName = Microsoft.Win32.Registry.GetValue(
+                        @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                        "ProductName", "Windows")?.ToString();
+
+                    return !string.IsNullOrEmpty(productName) ? productName : "Windows";
+                }
+                catch
+                {
+                    return "Windows";
+                }
+            }
+            else
+            {
+                // For non-Windows systems
+                return Environment.OSVersion.Platform.ToString();
+            }
         }
     }
 }

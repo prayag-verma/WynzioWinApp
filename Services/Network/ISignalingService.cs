@@ -28,9 +28,9 @@ namespace Wynzio.Services.Network
         /// Connect to the signaling server
         /// </summary>
         /// <param name="serverUrl">WebSocket URL of the signaling server</param>
-        /// <param name="hostId">Unique identifier for this host</param>
+        /// <param name="remotePcId">Unique identifier for this remote PC</param>
         /// <returns>Task representing the connection operation</returns>
-        Task ConnectAsync(string serverUrl, string hostId);
+        Task ConnectAsync(string serverUrl, string remotePcId);
 
         /// <summary>
         /// Disconnect from the signaling server
@@ -48,14 +48,22 @@ namespace Wynzio.Services.Network
         Task SendMessageAsync(string peerId, SignalingMessageType messageType, object payload);
 
         /// <summary>
+        /// Attempt to reuse an existing session
+        /// </summary>
+        /// <param name="sid">Session ID to reuse</param>
+        /// <param name="remotePcId">Remote PC ID</param>
+        /// <returns>Task representing the session reuse operation</returns>
+        Task ReuseSessionAsync(string sid, string remotePcId);
+
+        /// <summary>
         /// Whether the service is currently connected to the signaling server
         /// </summary>
         bool IsConnected { get; }
 
         /// <summary>
-        /// Unique identifier for this host
+        /// Unique identifier for this remote PC
         /// </summary>
-        string HostId { get; }
+        string RemotePcId { get; }
     }
 
     /// <summary>

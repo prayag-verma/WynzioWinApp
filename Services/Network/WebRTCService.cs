@@ -185,10 +185,7 @@ namespace Wynzio.Services.Network
                 await _signalingService.SendMessageAsync(peerId, SignalingMessageType.Offer, new
                 {
                     sdp = offer.sdp,
-                    type = "offer",
-                    hostId = _settings.HostId,
-                    stunServer = _settings.StunServer,
-                    timestamp = DateTime.Now.Ticks
+                    type = "offer"
                 });
 
                 _logger.Information("Offer sent to peer {PeerId}", peerId);
@@ -334,10 +331,7 @@ namespace Wynzio.Services.Network
                 await _signalingService.SendMessageAsync(peerId, SignalingMessageType.Answer, new
                 {
                     sdp = answer.sdp,
-                    type = "answer",
-                    hostId = _settings.HostId,
-                    accepted = true,
-                    timestamp = DateTime.Now.Ticks
+                    type = "answer"
                 });
 
                 _logger.Information("Answer sent to peer {PeerId}", peerId);
@@ -718,6 +712,7 @@ namespace Wynzio.Services.Network
                         break;
 
                     case SignalingMessageType.Connect:
+                        // Automatically create offer with no permission check
                         await CreateOfferAsync(e.PeerId);
                         break;
 
@@ -730,7 +725,7 @@ namespace Wynzio.Services.Network
                             if (!string.IsNullOrEmpty(command) &&
                                 customData["data"] != null)
                             {
-                                // Raise data channel message event for input processing
+                                // Always process control commands without permission checks
                                 DataChannelMessageReceived?.Invoke(this,
                                     new DataChannelMessageEventArgs(e.PeerId,
                                     customData["data"]?.ToString() ?? "{}"));
