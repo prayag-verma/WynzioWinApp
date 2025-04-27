@@ -20,7 +20,7 @@ namespace Wynzio.Models
             SettingsFileName);
 
         private string _remotePcId = string.Empty;
-        private string _signalServer = "wss://wynzio.com/signal";
+        private string _signalServer = "wss://wynzio.com/signal/";
         private bool _autoConnect = true;
         private string _stunServer = "stun:stun.l.google.com:19302";
         private string _turnServer = string.Empty;

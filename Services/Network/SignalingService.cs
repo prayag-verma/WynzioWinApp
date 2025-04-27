@@ -132,10 +132,18 @@ namespace Wynzio.Services.Network
 
                 // Connect WebSocket with existing sid
                 var wsUri = new UriBuilder(appSettings.SignalServer);
+
+                // Ensure the path ends with a trailing slash for Nginx compatibility
+                if (!wsUri.Path.EndsWith("/"))
+                {
+                    wsUri.Path = wsUri.Path + "/";
+                }
                 var query = HttpUtility.ParseQueryString(wsUri.Query);
                 query["EIO"] = "4";
                 query["transport"] = "websocket";
                 query["sid"] = _socketIOSid;
+                query["type"] = "device";
+                query["remotePcId"] = remotePcId;
                 wsUri.Query = query.ToString();
 
                 // Log the connection URI
@@ -202,9 +210,9 @@ namespace Wynzio.Services.Network
             }
         }
 
-        /// <summary>
-        /// Connect to the signaling server using Socket.IO protocol
-        /// </summary>
+        /**
+ * Connect to the signaling server using Socket.IO protocol
+ */
         public async Task ConnectAsync(string serverUrl, string remotePcId)
         {
             // Check for empty remotePcId and generate one if needed
@@ -294,14 +302,23 @@ namespace Wynzio.Services.Network
                     var appSettings = ConnectionSettings.Load();
 
                     // Perform Socket.IO handshake
-                    await PerformSocketIOHandshake(serverUrl, appSettings.ApiKey, combinedCts.Token);
+                    await PerformSocketIOHandshake(serverUrl, appSettings.ApiKey, combinedCts.Token, remotePcId);
 
                     // Now connect WebSocket with proper sid
                     var wsUri = new UriBuilder(serverUrl);
+
+                    // Ensure the path ends with a trailing slash for Nginx compatibility
+                    if (!wsUri.Path.EndsWith("/"))
+                    {
+                        wsUri.Path = wsUri.Path + "/";
+                    }
+
                     var query = HttpUtility.ParseQueryString(wsUri.Query);
                     query["EIO"] = "4";
                     query["transport"] = "websocket";
                     query["sid"] = _socketIOSid;
+                    query["type"] = "device";
+                    query["remotePcId"] = remotePcId;
                     wsUri.Query = query.ToString();
 
                     // Log the connection URI
@@ -452,18 +469,28 @@ namespace Wynzio.Services.Network
             }
         }
 
-        /// <summary>
-        /// Perform Socket.IO handshake via HTTP polling
-        /// </summary>
-        private async Task PerformSocketIOHandshake(string serverUrl, string apiKey, CancellationToken token)
+        /**
+         * Perform Socket.IO handshake via HTTP polling
+         * @param {string} serverUrl - WebSocket URL of the signaling server
+         * @param {string} apiKey - API key for authentication
+         * @param {CancellationToken} token - Cancellation token
+         * @param {string} remotePcId - Remote PC identifier
+         */
+        private async Task PerformSocketIOHandshake(string serverUrl, string apiKey, CancellationToken token, string remotePcId)
         {
             try
             {
                 // Convert WebSocket URL to HTTP
                 string httpUrl = serverUrl.Replace("wss://", "https://").Replace("ws://", "http://");
 
-                // Build the handshake URL - keep the path from the original URL
-                string handshakeUrl = $"{httpUrl}/?EIO=4&transport=polling";
+                // Ensure the path ends with a trailing slash for Nginx compatibility
+                if (!httpUrl.EndsWith("/"))
+                {
+                    httpUrl = httpUrl + "/";
+                }
+
+                // Build the handshake URL
+                string handshakeUrl = $"{httpUrl}?EIO=4&transport=polling&type=device&remotePcId={remotePcId}";
 
                 _logger.Information("Initiating Socket.IO handshake with {HandshakeUrl}", handshakeUrl);
 

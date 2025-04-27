@@ -311,16 +311,20 @@ namespace Wynzio.Services.Network
                     return;
                 }
 
-                // Add video track to peer connection for screen sharing
+                // Always add video track for screen sharing regardless of offer type
+                // This ensures screen sharing works properly
                 await AddScreenTrackAsync(peerConnection, peerId);
 
                 // Create answer
                 var answer = peerConnection.createAnswer(null);
 
-                // Create RTCSessionDescriptionInit for local description
+                // FIX: Check if the offer had data channel and ensure it's in the answer
+                string modifiedAnswerSdp = EnsureDataChannelInAnswer(sdp, answer.sdp);
+
+                // Create RTCSessionDescriptionInit for local description with modified SDP
                 var localDesc = new RTCSessionDescriptionInit
                 {
-                    sdp = answer.sdp,
+                    sdp = modifiedAnswerSdp,
                     type = RTCSdpType.answer
                 };
 
@@ -330,7 +334,7 @@ namespace Wynzio.Services.Network
                 // Send answer through signaling service
                 await _signalingService.SendMessageAsync(peerId, SignalingMessageType.Answer, new
                 {
-                    sdp = answer.sdp,
+                    sdp = modifiedAnswerSdp,
                     type = "answer"
                 });
 
@@ -352,6 +356,141 @@ namespace Wynzio.Services.Network
                 _logger.Error(ex, "Error processing offer from peer {PeerId}", peerId);
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Ensures that the answer SDP includes a data channel section if the offer had one
+        /// </summary>
+        /// <param name="offerSdp">The original offer SDP</param>
+        /// <param name="answerSdp">The generated answer SDP</param>
+        /// <returns>Modified answer SDP with data channel if needed</returns>
+        private string EnsureDataChannelInAnswer(string offerSdp, string answerSdp)
+        {
+            try
+            {
+                // Check if offer includes a data channel section (application)
+                if (!offerSdp.Contains("m=application") || !offerSdp.Contains("webrtc-datachannel"))
+                {
+                    // No data channel in offer, return original answer
+                    return answerSdp;
+                }
+
+                // Check if answer already has data channel section
+                if (answerSdp.Contains("m=application") && answerSdp.Contains("webrtc-datachannel"))
+                {
+                    // Answer already has data channel, return as is
+                    return answerSdp;
+                }
+
+                _logger.Debug("Adding data channel section to SDP answer");
+
+                // Parse the offer to get details needed for data channel section
+                string iceUfrag = ExtractSdpValue(offerSdp, "a=ice-ufrag:");
+                string icePwd = ExtractSdpValue(offerSdp, "a=ice-pwd:");
+                string fingerprint = ExtractSdpValue(offerSdp, "a=fingerprint:");
+                string setup = "active"; // We're always active as responder
+
+                // Get all ICE candidates from our answer
+                var candidates = new List<string>();
+                foreach (var line in answerSdp.Split("\r\n"))
+                {
+                    if (line.StartsWith("a=candidate:"))
+                    {
+                        candidates.Add(line);
+                    }
+                }
+
+                // Extract the mid value - should be 1 for data channel if following standard pattern
+                string dataMid = "1";
+
+                // Create the data channel m-line section
+                var dataChannelSection = new StringBuilder();
+                dataChannelSection.AppendLine("m=application 9 UDP/DTLS/SCTP webrtc-datachannel");
+                dataChannelSection.AppendLine("c=IN IP4 0.0.0.0");
+                dataChannelSection.AppendLine($"a=ice-ufrag:{iceUfrag}");
+                dataChannelSection.AppendLine($"a=ice-pwd:{icePwd}");
+                dataChannelSection.AppendLine("a=ice-options:trickle");
+                dataChannelSection.AppendLine($"a=fingerprint:{fingerprint}");
+                dataChannelSection.AppendLine($"a=setup:{setup}");
+                dataChannelSection.AppendLine($"a=mid:{dataMid}");
+                dataChannelSection.AppendLine("a=sctp-port:5000");
+                dataChannelSection.AppendLine("a=max-message-size:262144");
+
+                // Add candidates
+                foreach (var candidate in candidates)
+                {
+                    dataChannelSection.AppendLine(candidate);
+                }
+
+                // Update bundle group to include data channel
+                string originalBundle = ExtractSdpValue(answerSdp, "a=group:BUNDLE");
+                string updatedBundle = originalBundle + " " + dataMid;
+
+                // Replace the bundle line
+                string updatedAnswer = answerSdp.Replace(
+                    $"a=group:BUNDLE {originalBundle}",
+                    $"a=group:BUNDLE {updatedBundle}");
+
+                // If that didn't work, try with just the number
+                if (updatedAnswer == answerSdp)
+                {
+                    updatedAnswer = answerSdp.Replace(
+                        $"a=group:BUNDLE {originalBundle}",
+                        $"a=group:BUNDLE {originalBundle} {dataMid}");
+                }
+
+                // Make sure we end each line with \r\n
+                string[] lines = answerSdp.Split(new[] { "\r\n" }, StringSplitOptions.None);
+                string cleanedAnswerSdp = string.Join("\r\n", lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+
+                // Find the position to insert the data channel section
+                int insertPos = cleanedAnswerSdp.LastIndexOf("\r\n");
+                if (insertPos < 0)
+                {
+                    insertPos = cleanedAnswerSdp.Length;
+                }
+
+                // Insert the data channel section
+                if (insertPos > 0)
+                {
+                    updatedAnswer = cleanedAnswerSdp.Insert(insertPos, "\r\n" + dataChannelSection.ToString().TrimEnd());
+                }
+                else
+                {
+                    // If insertion fails, just append
+                    updatedAnswer = cleanedAnswerSdp + "\r\n" + dataChannelSection.ToString().TrimEnd();
+                }
+
+                // Ensure the SDP doesn't have any trailing characters after the last valid line
+                if (!updatedAnswer.EndsWith("\r\n"))
+                {
+                    updatedAnswer += "\r\n";
+                }
+
+                _logger.Debug("Successfully added data channel section to SDP answer");
+                return updatedAnswer;
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Error modifying SDP answer to include data channel");
+                // Return original in case of error
+                return answerSdp;
+            }
+        }
+
+        /// <summary>
+        /// Extract value from SDP line starting with the given prefix
+        /// </summary>
+        private string ExtractSdpValue(string sdp, string prefix)
+        {
+            foreach (var line in sdp.Split(new[] { "\r\n" }, StringSplitOptions.None))
+            {
+                if (line.StartsWith(prefix))
+                {
+                    return line.Substring(prefix.Length).Trim();
+                }
+            }
+            return string.Empty;
         }
 
         /// <summary>

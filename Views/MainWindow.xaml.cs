@@ -1,6 +1,7 @@
 ﻿using System;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Threading;
 using Wynzio.ViewModels;
 
 namespace Wynzio.Views
@@ -53,14 +54,20 @@ namespace Wynzio.Views
             {
                 if (_viewModel != null)
                 {
-                    UpdateTrayMenuStatus(_viewModel.StatusMessage, _viewModel.RemotePcId);
+                    // Fix: Use Dispatcher to ensure UI updates happen on the UI thread
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => {
+                        UpdateTrayMenuStatus(_viewModel.StatusMessage, _viewModel.RemotePcId);
+                    }));
                 }
             }
             else if (e.PropertyName == nameof(MainViewModel.IsAutoStartEnabled))
             {
                 if (_viewModel != null && miAutoStart != null)
                 {
-                    miAutoStart.IsChecked = _viewModel.IsAutoStartEnabled;
+                    // Fix: Use Dispatcher to ensure UI updates happen on the UI thread
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => {
+                        miAutoStart.IsChecked = _viewModel.IsAutoStartEnabled;
+                    }));
                 }
             }
         }
@@ -70,6 +77,18 @@ namespace Wynzio.Views
         /// </summary>
         private void UpdateTrayMenuStatus(string status, string hostId)
         {
+            // Check if we're on the UI thread
+            if (!Dispatcher.CheckAccess())
+            {
+                // If not on UI thread, invoke on UI thread
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => {
+                    UpdateTrayMenuStatus(status, hostId);
+                }));
+                return;
+            }
+
+            // Now we're definitely on the UI thread
+
             // Update status menu item
             if (miStatus != null)
             {
